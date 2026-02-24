@@ -1,0 +1,78 @@
+metadata:
+  id: "compression.dedup_decision"
+  name: "Memory Deduplication Decision"
+  description: "Decide candidate action (skip/create/none) and per-memory actions (merge/delete)"
+  version: "1.0.0"
+  language: "zh"
+  category: "compression"
+
+variables:
+  - name: "candidate_content"
+    type: "string"
+    description: "Candidate memory content (L2)"
+    required: true
+  - name: "candidate_abstract"
+    type: "string"
+    description: "Candidate memory abstract (L0)"
+    required: true
+  - name: "candidate_overview"
+    type: "string"
+    description: "Candidate memory overview (L1)"
+    required: true
+  - name: "existing_memories"
+    type: "string"
+    description: "List of existing similar memories"
+    required: true
+
+template: |
+  你正在决定如何用新记忆更新长期记忆：
+  1) 一条候选记忆（新事实）
+  2) 已有的相似记忆（从存储中检索）
+
+  候选记忆:
+  - 摘要: {{ candidate_abstract }}
+  - 概览: {{ candidate_overview }}
+  - 内容: {{ candidate_content }}
+
+  已有相似记忆:
+  {{ existing_memories }}
+
+  目标: 保持记忆一致且有用，最小化破坏性编辑。
+
+  候选级决策:
+  - skip: 候选没有新信息（重复/换了说法/太弱）。不改变任何记忆。
+  - create: 候选是有效的新记忆，应作为独立条目存储。可选删除完全失效的已有记忆。
+  - none: 候选本身不存储，但已有记忆需要通过 per-item action 调整。
+
+  已有记忆 per-item action:
+  - merge: 已有记忆和候选是同一主题，应合并。用于细化、纠正、部分冲突、补充细节。
+  - delete: 已有记忆必须删除，仅当候选完全使整条已有记忆失效时。
+
+  关键删除边界:
+  - 部分冲突（一些陈述冲突，其他仍有效）→ 不要删除，用 merge。
+  - 只有整条已有记忆都过时/失效时才 delete。
+  - 主题/维度不匹配的绝不删除。
+
+  硬约束:
+  - decision 是 "skip" 时，不返回 "list"。
+  - 任何 list item 用 "merge" 时，decision 必须是 "none"。
+  - decision 是 "create" 时，list 只能为空或只含 delete。
+  - uri 必须精确使用已有记忆列表中的值。
+  - 不变的已有记忆不要出现在 list 中。
+  - 只返回 JSON。
+
+  返回 JSON:
+  {
+    "decision": "skip|create|none",
+    "reason": "简短原因",
+    "list": [
+      {
+        "uri": "<已有记忆 uri>",
+        "decide": "merge|delete",
+        "reason": "简短原因"
+      }
+    ]
+  }
+
+llm_config:
+  temperature: 0.0

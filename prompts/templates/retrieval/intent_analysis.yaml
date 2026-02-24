@@ -1,0 +1,85 @@
+metadata:
+  id: "retrieval.intent_analysis"
+  name: "Intent Analysis"
+  description: "Analyze query intent and generate retrieval plan"
+  version: "1.0.0"
+  language: "zh"
+  category: "retrieval"
+
+variables:
+  - name: "compression_summary"
+    type: "string"
+    description: "Session summary"
+    default: ""
+    required: false
+  - name: "recent_messages"
+    type: "string"
+    description: "Recent conversation"
+    required: true
+  - name: "current_message"
+    type: "string"
+    description: "Current message"
+    required: true
+  - name: "context_type"
+    type: "string"
+    description: "Restricted context type"
+    default: ""
+    required: false
+
+template: |
+  你是 Amber Memory 的查询规划器，负责分析意图并生成检索计划。
+
+  ## 会话上下文
+
+  ### 历史摘要
+  {{ compression_summary }}
+
+  ### 最近对话
+  {{ recent_messages }}
+
+  ### 当前消息
+  {{ current_message }}
+  {% if context_type %}
+
+  ## 搜索范围限制
+  只生成 `{{ context_type }}` 类型的查询。
+  {% endif %}
+
+  ## 8 维度记忆类型
+
+  | 维度 | 查询风格 | 示例 |
+  |------|----------|------|
+  | person | "用户的XX是谁" | "Frankie 的家人信息" |
+  | activity | "发生了什么" | "上周的重要决定" |
+  | object | "XX项目的状态" | "Watchlace 当前进度" |
+  | preference | "用户喜欢/习惯" | "代码风格偏好" |
+  | taboo | "什么不能提" | "用户的敏感话题" |
+  | goal | "用户想达成什么" | "近期目标和进度" |
+  | pattern | "什么规律/流程" | "工作习惯和作息" |
+  | thought | "用户的思考" | "对AI身份的看法" |
+
+  ## 分析方法
+
+  1. 识别当前消息需要什么信息
+  2. 检查会话上下文是否已包含
+  3. 生成补充查询（最多 5 条）
+
+  ## 输出 JSON
+
+  {
+    "reasoning": "分析过程",
+    "queries": [
+      {
+        "query": "具体查询文本",
+        "context_type": "person|activity|object|preference|taboo|goal|pattern|thought",
+        "intent": "查询目的",
+        "priority": 1
+      }
+    ]
+  }
+
+  priority: 1=最高（核心需求），3=中等，5=最低（可选）
+  没有需要查询的返回 {"reasoning": "...", "queries": []}
+
+llm_config:
+  temperature: 0.0

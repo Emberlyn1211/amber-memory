@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "amber-memory"
+version = "0.2.0"
+description = "8-dimension memory system for AI agents with decay, dedup, and semantic retrieval"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.7"
+authors = [
+    {name = "Amber Lin", email = "amberlin.research@gmail.com"},
+]
+keywords = ["ai", "agent", "memory", "llm", "embedding", "retrieval"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.28.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.0",
+]
+
+[project.optional-dependencies]
+ark = ["httpx>=0.24.0"]
+photo = ["Pillow>=9.0"]
+all = ["httpx>=0.24.0", "Pillow>=9.0"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+
+[project.urls]
+Homepage = "https://github.com/Emberlyn1211/amber-memory"
+Repository = "https://github.com/Emberlyn1211/amber-memory"
+Issues = "https://github.com/Emberlyn1211/amber-memory/issues"
+
+[project.scripts]
+amber-memory = "amber_memory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["amber_memory*"]
+
+[tool.setuptools.package-data]
+"amber_memory.prompts.templates" = ["**/*.yaml"]
