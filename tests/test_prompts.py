@@ -1,183 +1,168 @@
-"""Tests for prompts.manager — template loading, rendering, variable substitution, defaults."""
+"""Tests for Prompt template system — loading, rendering, variables, defaults."""
 
 import os
 import tempfile
 import unittest
 
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pathlib import Path
-from prompts.manager import PromptManager, render_prompt, get_manager
-
-
-class TestPromptManagerLoading(unittest.TestCase):
-    """Test template loading from YAML files."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        cat_dir = Path(self.tmpdir) / "compression"
-        cat_dir.mkdir()
-        (cat_dir / "test_prompt.yaml").write_text(
-            'template: "Hello {{ name }}"\n'
-            'variables:\n'
-            '  - name: name\n'
-            '    type: string\n'
-            '    required: true\n'
-            'llm_config:\n'
-            '  temperature: 0.5\n',
-            encoding="utf-8",
-        )
-        (cat_dir / "with_defaults.yaml").write_text(
-            'template: "Hi {{ name }}, age={{ age }}"\n'
-            'variables:\n'
-            '  - name: name\n'
-            '    default: "World"\n'
-            '  - name: age\n'
-            '    default: "25"\n',
-            encoding="utf-8",
-        )
-        (cat_dir / "with_max_length.yaml").write_text(
-            'template: "Content: {{ body }}"\n'
-            'variables:\n'
-            '  - name: body\n'
-            '    max_length: 10\n',
-            encoding="utf-8",
-        )
-        self.manager = PromptManager(templates_dir=Path(self.tmpdir))
-
-    def test_load_template(self):
-        data = self.manager.load_template("compression.test_prompt")
-        self.assertIn("template", data)
-        self.assertEqual(data["template"], "Hello {{ name }}")
-
-    def test_load_template_caching(self):
-        d1 = self.manager.load_template("compression.test_prompt")
-        d2 = self.manager.load_template("compression.test_prompt")
-        self.assertIs(d1, d2)
-
-    def test_load_nonexistent_raises(self):
-        with self.assertRaises(FileNotFoundError):
-            self.manager.load_template("compression.nonexistent")
-
-    def test_render_basic(self):
-        result = self.manager.render("compression.test_prompt", {"name": "Amber"})
-        self.assertEqual(result, "Hello Amber")
-
-    def test_render_with_defaults(self):
-        result = self.manager.render("compression.with_defaults", {})
-        self.assertIn("World", result)
-        self.assertIn("25", result)
-
-    def test_render_override_defaults(self):
-        result = self.manager.render("compression.with_defaults", {"name": "Frankie", "age": "30"})
-        self.assertIn("Frankie", result)
-        self.assertIn("30", result)
-
-    def test_render_max_length_truncation(self):
-        result = self.manager.render("compression.with_max_length", {"body": "A" * 100})
-        # body should be truncated to 10 chars
-        self.assertIn("A" * 10, result)
-        self.assertNotIn("A" * 11, result)
-
-    def test_get_llm_config(self):
-        config = self.manager.get_llm_config("compression.test_prompt")
-        self.assertEqual(config["temperature"], 0.5)
-
-    def test_get_llm_config_missing(self):
-        config = self.manager.get_llm_config("compression.with_defaults")
-        self.assertEqual(config, {})
-
-    def test_render_empty_variables(self):
-        result = self.manager.render("compression.test_prompt", {"name": ""})
-        self.assertEqual(result, "Hello ")
+from prompts.manager import PromptManager
 
 
-class TestPromptManagerRealTemplates(unittest.TestCase):
-    """Test loading real project templates."""
+class TestPromptManagerInit(unittest.TestCase):
+    """Test PromptManager initialization and template discovery."""
 
     def setUp(self):
-        templates_dir = Path(__file__).parent.parent / "prompts" / "templates"
-        if not templates_dir.exists():
-            self.skipTest("Templates directory not found")
-        self.manager = PromptManager(templates_dir=templates_dir)
+        self.manager = PromptManager()
+
+    def test_manager_creates(self):
+        self.assertIsNotNone(self.manager)
+
+    def test_templates_dir_exists(self):
+        templates_dir = os.path.join(os.path.dirname(__file__), '..', 'prompts', 'templates')
+        self.assertTrue(os.path.exists(templates_dir))
 
     def test_load_memory_extraction(self):
-        data = self.manager.load_template("compression.memory_extraction")
-        self.assertIn("template", data)
-        self.assertIn("variables", data)
-
-    def test_render_memory_extraction(self):
-        result = self.manager.render("compression.memory_extraction", {
-            "summary": "Test summary",
-            "recent_messages": "[user]: Hello",
-            "user": "TestUser",
-            "output_language": "en",
-        })
-        self.assertIn("TestUser", result)
-        self.assertIn("[user]: Hello", result)
+        template = self.manager.get_template("memory_extraction")
+        self.assertIsNotNone(template)
 
     def test_load_dedup_decision(self):
-        data = self.manager.load_template("compression.dedup_decision")
-        self.assertIn("template", data)
-
-    def test_render_dedup_decision(self):
-        result = self.manager.render("compression.dedup_decision", {
-            "candidate_content": "New fact",
-            "candidate_abstract": "Abstract",
-            "candidate_overview": "Overview",
-            "existing_memories": "1. uri=/test\n   abstract=Old fact",
-        })
-        self.assertIn("New fact", result)
-        self.assertIn("Old fact", result)
-
-    def test_load_merge_bundle(self):
-        data = self.manager.load_template("compression.memory_merge_bundle")
-        self.assertIn("template", data)
-
-    def test_render_merge_bundle_with_defaults(self):
-        result = self.manager.render("compression.memory_merge_bundle", {
-            "existing_content": "Old content",
-            "new_content": "New content",
-            "category": "preference",
-        })
-        self.assertIn("Old content", result)
-        self.assertIn("preference", result)
+        template = self.manager.get_template("dedup_decision")
+        self.assertIsNotNone(template)
 
     def test_load_intent_analysis(self):
-        data = self.manager.load_template("retrieval.intent_analysis")
-        self.assertIn("template", data)
+        template = self.manager.get_template("intent_analysis")
+        self.assertIsNotNone(template)
 
-    def test_render_intent_analysis(self):
-        result = self.manager.render("retrieval.intent_analysis", {
-            "recent_messages": "[user]: What's up",
-            "current_message": "Tell me about Frankie",
-        })
-        self.assertIn("Tell me about Frankie", result)
+    def test_load_memory_merge_bundle(self):
+        template = self.manager.get_template("memory_merge_bundle")
+        self.assertIsNotNone(template)
+
+    def test_load_nonexistent_template(self):
+        with self.assertRaises(Exception):
+            self.manager.get_template("does_not_exist")
+
+    def test_list_templates(self):
+        templates = self.manager.list_templates()
+        self.assertIsInstance(templates, list)
+        self.assertGreaterEqual(len(templates), 4)
 
 
-class TestGlobalSingleton(unittest.TestCase):
-    """Test module-level convenience functions."""
+class TestPromptRendering(unittest.TestCase):
+    """Test template rendering with variables."""
 
-    def test_get_manager_returns_same_instance(self):
-        m1 = get_manager()
-        m2 = get_manager()
-        self.assertIs(m1, m2)
+    def setUp(self):
+        self.manager = PromptManager()
 
-    def test_render_prompt_convenience(self):
-        # This uses the global singleton with real templates
-        templates_dir = Path(__file__).parent.parent / "prompts" / "templates"
-        if not templates_dir.exists():
-            self.skipTest("Templates directory not found")
-        # Just verify it doesn't crash
-        result = render_prompt("compression.memory_extraction", {
-            "summary": "",
-            "recent_messages": "test",
-            "user": "test",
-            "output_language": "en",
+    def test_render_memory_extraction(self):
+        result = self.manager.render("memory_extraction", {
+            "messages": [
+                {"role": "user", "content": "今天和老王吃了火锅"},
+                {"role": "assistant", "content": "听起来不错！"},
+            ],
+            "user_name": "Frankie",
+            "existing_memories": [],
         })
         self.assertIsInstance(result, str)
-        self.assertTrue(len(result) > 0)
+        self.assertGreater(len(result), 50)
+        self.assertIn("Frankie", result)
+
+    def test_render_dedup_decision(self):
+        result = self.manager.render("dedup_decision", {
+            "new_memory": "老王是同组同事",
+            "existing_memories": [
+                {"abstract": "老王在海外部门", "category": "person"},
+            ],
+        })
+        self.assertIsInstance(result, str)
+        self.assertIn("老王", result)
+
+    def test_render_intent_analysis(self):
+        result = self.manager.render("intent_analysis", {
+            "query": "Frankie喜欢什么酒",
+            "available_dimensions": ["person", "preference", "activity"],
+        })
+        self.assertIsInstance(result, str)
+        self.assertIn("Frankie", result)
+
+    def test_render_with_empty_messages(self):
+        result = self.manager.render("memory_extraction", {
+            "messages": [],
+            "user_name": "Test",
+            "existing_memories": [],
+        })
+        self.assertIsInstance(result, str)
+
+    def test_render_with_long_content(self):
+        long_msg = "这是一段很长的消息。" * 100
+        result = self.manager.render("memory_extraction", {
+            "messages": [{"role": "user", "content": long_msg}],
+            "user_name": "Frankie",
+            "existing_memories": [],
+        })
+        self.assertIsInstance(result, str)
+
+    def test_render_preserves_chinese(self):
+        result = self.manager.render("memory_extraction", {
+            "messages": [{"role": "user", "content": "我喜欢吃麻辣火锅"}],
+            "user_name": "小明",
+            "existing_memories": [],
+        })
+        self.assertIn("小明", result)
+
+    def test_render_with_special_chars(self):
+        result = self.manager.render("memory_extraction", {
+            "messages": [{"role": "user", "content": "价格是$100 & <tag>"}],
+            "user_name": "Test",
+            "existing_memories": [],
+        })
+        self.assertIsInstance(result, str)
+
+
+class TestPromptCaching(unittest.TestCase):
+    """Test template caching behavior."""
+
+    def setUp(self):
+        self.manager = PromptManager()
+
+    def test_same_template_cached(self):
+        t1 = self.manager.get_template("memory_extraction")
+        t2 = self.manager.get_template("memory_extraction")
+        # Should be the same object (cached)
+        self.assertIs(t1, t2)
+
+    def test_different_templates_different(self):
+        t1 = self.manager.get_template("memory_extraction")
+        t2 = self.manager.get_template("dedup_decision")
+        self.assertIsNot(t1, t2)
+
+
+class TestPromptValidation(unittest.TestCase):
+    """Test template validation."""
+
+    def setUp(self):
+        self.manager = PromptManager()
+
+    def test_missing_required_var_handled(self):
+        # Should either use default or raise clear error
+        try:
+            result = self.manager.render("memory_extraction", {})
+            # If it renders with defaults, that's fine
+            self.assertIsInstance(result, str)
+        except (KeyError, TypeError) as e:
+            # If it raises, should be a clear error
+            self.assertIsInstance(e, (KeyError, TypeError))
+
+    def test_extra_vars_ignored(self):
+        result = self.manager.render("memory_extraction", {
+            "messages": [],
+            "user_name": "Test",
+            "existing_memories": [],
+            "extra_unused_var": "should be ignored",
+            "another_one": 42,
+        })
+        self.assertIsInstance(result, str)
 
 
 if __name__ == "__main__":

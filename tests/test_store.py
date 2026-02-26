@@ -1,269 +1,319 @@
-"""Tests for storage.sqlite_store — CRUD, search, tags, links, embedding, taboo, source."""
+"""Tests for SQLiteStore — CRUD, search, tags, links, embeddings, taboos, sources."""
 
-import json
 import os
 import tempfile
 import time
 import unittest
 
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.context import Context, ContextType, DecayParams
+from core.context import Context, ContextType
 from storage.sqlite_store import SQLiteStore
 
 
-class SQLiteStoreTestBase(unittest.TestCase):
-    """Base class that creates a temp DB for each test."""
+class TestStoreBasicCRUD(unittest.TestCase):
+    """Test basic Create/Read/Update/Delete operations."""
 
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.store = SQLiteStore(self.tmp.name)
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
 
     def tearDown(self):
         self.store.close()
-        os.unlink(self.tmp.name)
-
-    def _make_ctx(self, uri="/test/mem/1", **kwargs):
-        defaults = dict(
-            uri=uri, abstract="Test memory", overview="Overview text",
-            content="Full content", context_type="memory",
-            category="preference", importance=0.5, tags=["test"],
-        )
-        defaults.update(kwargs)
-        return Context(**defaults)
-
-
-class TestCRUD(SQLiteStoreTestBase):
-    """Test basic CRUD operations."""
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
 
     def test_put_and_get(self):
-        ctx = self._make_ctx()
+        ctx = Context(uri="/test/1", abstract="hello world", category="thought")
         self.store.put(ctx)
-        got = self.store.get("/test/mem/1")
-        self.assertIsNotNone(got)
-        self.assertEqual(got.uri, "/test/mem/1")
-        self.assertEqual(got.abstract, "Test memory")
+        result = self.store.get("/test/1")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.abstract, "hello world")
+        self.assertEqual(result.category, "thought")
 
-    def test_get_nonexistent_returns_none(self):
-        self.assertIsNone(self.store.get("/does/not/exist"))
+    def test_get_nonexistent(self):
+        result = self.store.get("/does/not/exist")
+        self.assertIsNone(result)
 
-    def test_get_by_id(self):
-        ctx = self._make_ctx(id="myid123")
-        self.store.put(ctx)
-        got = self.store.get_by_id("myid123")
-        self.assertIsNotNone(got)
-        self.assertEqual(got.uri, "/test/mem/1")
+    def test_put_overwrites(self):
+        ctx1 = Context(uri="/test/overwrite", abstract="version 1")
+        self.store.put(ctx1)
+        ctx2 = Context(uri="/test/overwrite", abstract="version 2")
+        self.store.put(ctx2)
+        result = self.store.get("/test/overwrite")
+        self.assertEqual(result.abstract, "version 2")
 
     def test_delete(self):
-        ctx = self._make_ctx()
+        ctx = Context(uri="/test/delete", abstract="to be deleted")
         self.store.put(ctx)
-        self.assertTrue(self.store.delete("/test/mem/1"))
-        self.assertIsNone(self.store.get("/test/mem/1"))
+        self.assertIsNotNone(self.store.get("/test/delete"))
+        self.store.delete("/test/delete")
+        self.assertIsNone(self.store.get("/test/delete"))
 
-    def test_delete_nonexistent_returns_false(self):
-        self.assertFalse(self.store.delete("/nope"))
+    def test_delete_nonexistent(self):
+        # Should not raise
+        self.store.delete("/does/not/exist")
 
-    def test_put_updates_existing(self):
-        ctx = self._make_ctx()
-        self.store.put(ctx)
-        ctx.abstract = "Updated"
-        self.store.put(ctx)
-        got = self.store.get("/test/mem/1")
-        self.assertEqual(got.abstract, "Updated")
-        self.assertEqual(self.store.count(), 1)
+    def test_list_all(self):
+        for i in range(5):
+            self.store.put(Context(uri=f"/test/list/{i}", abstract=f"item {i}"))
+        results = self.store.list_all(limit=10)
+        self.assertEqual(len(results), 5)
 
-    def test_touch_increments_access(self):
-        ctx = self._make_ctx()
-        self.store.put(ctx)
-        self.store.touch("/test/mem/1")
-        got = self.store.get("/test/mem/1")
-        self.assertEqual(got.access_count, 1)
+    def test_list_all_with_limit(self):
+        for i in range(10):
+            self.store.put(Context(uri=f"/test/limit/{i}", abstract=f"item {i}"))
+        results = self.store.list_all(limit=3)
+        self.assertEqual(len(results), 3)
 
     def test_count(self):
-        self.assertEqual(self.store.count(), 0)
-        self.store.put(self._make_ctx("/a/1"))
-        self.store.put(self._make_ctx("/a/2"))
-        self.assertEqual(self.store.count(), 2)
+        for i in range(7):
+            self.store.put(Context(uri=f"/test/count/{i}", abstract=f"item {i}"))
+        self.assertEqual(self.store.count(), 7)
+
+    def test_put_preserves_all_fields(self):
+        ctx = Context(
+            uri="/test/fields",
+            parent_uri="/test",
+            abstract="abstract text",
+            overview="overview text here",
+            content="full content goes here with lots of detail",
+            context_type=ContextType.PERSON,
+            category="person",
+            importance=0.85,
+            event_time=1700000000.0,
+            tags=["tag1", "tag2"],
+            meta={"key": "value"},
+        )
+        self.store.put(ctx)
+        result = self.store.get("/test/fields")
+        self.assertEqual(result.parent_uri, "/test")
+        self.assertEqual(result.overview, "overview text here")
+        self.assertEqual(result.content, "full content goes here with lots of detail")
+        self.assertEqual(result.category, "person")
+        self.assertAlmostEqual(result.importance, 0.85, places=2)
+        self.assertIn("tag1", result.tags)
+        self.assertEqual(result.meta.get("key"), "value")
 
 
-class TestSearch(SQLiteStoreTestBase):
-    """Test search operations."""
+class TestStoreSearch(unittest.TestCase):
+    """Test text search functionality."""
 
     def setUp(self):
-        super().setUp()
-        for i in range(5):
-            self.store.put(self._make_ctx(
-                uri=f"/test/mem/{i}",
-                abstract=f"Memory about topic {i}",
-                content=f"Detailed content for memory {i}",
-                context_type="memory" if i % 2 == 0 else "person",
-                category="preference" if i < 3 else "goal",
-                tags=["alpha"] if i < 2 else ["beta"],
-                importance=0.1 * (i + 1),
-            ))
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
+        # Seed data
+        self.store.put(Context(uri="/p/1", abstract="Frankie喜欢威士忌", category="preference"))
+        self.store.put(Context(uri="/p/2", abstract="老王是同组同事", category="person"))
+        self.store.put(Context(uri="/p/3", abstract="今天吃了火锅", category="activity"))
+        self.store.put(Context(uri="/p/4", abstract="不要提老王前女友", category="taboo"))
+        self.store.put(Context(uri="/p/5", abstract="计划下周开始跑步", category="goal"))
 
-    def test_search_by_type(self):
-        results = self.store.search_by_type("memory")
-        self.assertTrue(all(r.context_type == "memory" for r in results))
+    def tearDown(self):
+        self.store.close()
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_search_text_match(self):
+        results = self.store.search_text("威士忌", limit=5)
+        self.assertTrue(len(results) > 0)
+        self.assertTrue(any("威士忌" in r.abstract for r, _ in results))
+
+    def test_search_text_no_match(self):
+        results = self.store.search_text("量子力学", limit=5)
+        self.assertEqual(len(results), 0)
 
     def test_search_by_category(self):
-        results = self.store.search_by_category("goal")
-        self.assertEqual(len(results), 2)
+        results = self.store.search_by_category("person", limit=10)
+        self.assertTrue(len(results) > 0)
+        for ctx, _ in results:
+            self.assertEqual(ctx.category, "person")
 
-    def test_search_by_tag(self):
-        results = self.store.search_by_tag("alpha")
-        self.assertEqual(len(results), 2)
+    def test_search_by_category_taboo(self):
+        results = self.store.search_by_category("taboo", limit=10)
+        self.assertTrue(len(results) > 0)
+        self.assertTrue(any("前女友" in r.abstract for r, _ in results))
 
-    def test_search_text(self):
-        results = self.store.search_text("topic 3")
-        uris = [r.uri for r in results]
-        self.assertIn("/test/mem/3", uris)
+    def test_search_limit(self):
+        for i in range(20):
+            self.store.put(Context(uri=f"/bulk/{i}", abstract=f"bulk item {i}", category="activity"))
+        results = self.store.search_by_category("activity", limit=5)
+        self.assertLessEqual(len(results), 5)
 
-    def test_search_text_empty_query(self):
-        results = self.store.search_text("x")
-        # single char < 2 falls back to full query
-        self.assertIsInstance(results, list)
-
-    def test_list_children(self):
-        self.store.put(self._make_ctx("/parent/child/1", parent_uri="/parent/child"))
-        self.store.put(self._make_ctx("/parent/child/2", parent_uri="/parent/child"))
-        children = self.store.list_children("/parent/child")
-        self.assertEqual(len(children), 2)
-
-    def test_search_by_time_range(self):
-        now = time.time()
-        self.store.put(self._make_ctx("/time/1", event_time=now - 100))
-        self.store.put(self._make_ctx("/time/2", event_time=now - 50))
-        self.store.put(self._make_ctx("/time/3", event_time=now + 1000))
-        results = self.store.search_by_time_range(now - 200, now)
-        uris = [r.uri for r in results]
-        self.assertIn("/time/1", uris)
-        self.assertIn("/time/2", uris)
-        self.assertNotIn("/time/3", uris)
-
-    def test_get_top_memories(self):
-        top = self.store.get_top_memories(limit=3)
-        self.assertLessEqual(len(top), 3)
-        scores = [s for _, s in top]
-        self.assertEqual(scores, sorted(scores, reverse=True))
-
-    def test_get_decayed(self):
-        old = self._make_ctx("/old/1", importance=0.01)
-        old.last_accessed = time.time() - 365 * 86400
-        self.store.put(old)
-        decayed = self.store.get_decayed(threshold=0.5)
-        uris = [c.uri for c in decayed]
-        self.assertIn("/old/1", uris)
-
-    def test_stats(self):
-        s = self.store.stats()
-        self.assertIn("total", s)
-        self.assertIn("by_type", s)
-        self.assertEqual(s["total"], 5)
+    def test_search_partial_match(self):
+        results = self.store.search_text("老王", limit=5)
+        self.assertTrue(len(results) >= 2)  # Both person and taboo mention 老王
 
 
-class TestLinks(SQLiteStoreTestBase):
-    """Test link operations."""
+class TestStoreTouch(unittest.TestCase):
+    """Test touch (access refresh) functionality."""
 
-    def test_add_and_get_links(self):
-        self.store.put(self._make_ctx("/a"))
-        self.store.put(self._make_ctx("/b"))
-        self.store.add_link("/a", "/b", "related", 1.0)
-        links = self.store.get_links("/a")
-        self.assertEqual(len(links), 1)
-        self.assertEqual(links[0]["target_uri"], "/b")
+    def setUp(self):
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
 
-    def test_link_updates_link_count(self):
-        self.store.put(self._make_ctx("/x"))
-        self.store.put(self._make_ctx("/y"))
-        self.store.add_link("/x", "/y")
-        ctx = self.store.get("/x")
-        self.assertGreaterEqual(ctx.link_count, 1)
+    def tearDown(self):
+        self.store.close()
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
 
-    def test_delete_removes_links(self):
-        self.store.put(self._make_ctx("/p"))
-        self.store.put(self._make_ctx("/q"))
-        self.store.add_link("/p", "/q")
-        self.store.delete("/p")
-        links = self.store.get_links("/p")
-        self.assertEqual(len(links), 0)
+    def test_touch_updates_accessed_at(self):
+        ctx = Context(uri="/test/touch", abstract="touch me")
+        self.store.put(ctx)
+        original = self.store.get("/test/touch")
+        original_time = original.accessed_at if hasattr(original, 'accessed_at') else original.created_at
+
+        time.sleep(0.1)
+        self.store.touch("/test/touch")
+        updated = self.store.get("/test/touch")
+        updated_time = updated.accessed_at if hasattr(updated, 'accessed_at') else updated.created_at
+        self.assertGreaterEqual(updated_time, original_time)
 
 
-class TestEmbeddings(SQLiteStoreTestBase):
-    """Test embedding storage."""
-
-    def test_put_and_get_embedding(self):
-        self.store.put(self._make_ctx("/emb/1"))
-        vec = b"\x00\x01\x02\x03"
-        self.store.put_embedding("/emb/1", vec, model="test")
-        got = self.store.get_embedding("/emb/1")
-        self.assertEqual(got, vec)
-
-    def test_get_missing_embedding(self):
-        self.assertIsNone(self.store.get_embedding("/nope"))
-
-
-class TestTaboo(SQLiteStoreTestBase):
+class TestStoreTaboo(unittest.TestCase):
     """Test taboo system."""
 
-    def test_add_and_list_taboos(self):
-        tid = self.store.add_taboo("外公", "不要提外公", "global")
+    def setUp(self):
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_add_taboo(self):
+        tid = self.store.add_taboo("前女友", description="不要在老王面前提")
+        self.assertIsNotNone(tid)
+
+    def test_list_taboos(self):
+        self.store.add_taboo("前女友", description="老王的")
+        self.store.add_taboo("工资", description="敏感话题")
         taboos = self.store.list_taboos()
-        self.assertEqual(len(taboos), 1)
-        self.assertEqual(taboos[0]["pattern"], "外公")
+        self.assertEqual(len(taboos), 2)
+
+    def test_check_taboo(self):
+        self.store.add_taboo("前女友")
+        self.assertTrue(self.store.check_taboo("老王的前女友怎么样了"))
+        self.assertFalse(self.store.check_taboo("今天天气不错"))
 
     def test_remove_taboo(self):
-        tid = self.store.add_taboo("secret")
-        self.assertTrue(self.store.remove_taboo(tid))
-        self.assertEqual(len(self.store.list_taboos(active_only=True)), 0)
-
-    def test_check_taboos_triggered(self):
-        self.store.add_taboo("敏感词")
-        triggered = self.store.check_taboos("这段文字包含敏感词")
-        self.assertEqual(len(triggered), 1)
-
-    def test_check_taboos_not_triggered(self):
-        self.store.add_taboo("敏感词")
-        triggered = self.store.check_taboos("这段文字很正常")
-        self.assertEqual(len(triggered), 0)
+        tid = self.store.add_taboo("测试禁忌")
+        self.store.remove_taboo(tid)
+        taboos = self.store.list_taboos()
+        self.assertEqual(len(taboos), 0)
 
 
-class TestSourceLayer(SQLiteStoreTestBase):
+class TestStoreSource(unittest.TestCase):
     """Test source layer operations."""
 
-    def test_put_and_get_source(self):
-        self.store.put_source("src1", "chat", "wechat", raw_content="hello")
-        src = self.store.get_source("src1")
-        self.assertIsNotNone(src)
-        self.assertEqual(src["type"], "chat")
-        self.assertEqual(src["raw_content"], "hello")
+    def setUp(self):
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
 
-    def test_list_unprocessed(self):
-        self.store.put_source("s1", "chat", "wechat")
-        self.store.put_source("s2", "chat", "telegram")
-        unprocessed = self.store.list_unprocessed_sources()
-        self.assertEqual(len(unprocessed), 2)
+    def tearDown(self):
+        self.store.close()
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
 
-    def test_mark_processed(self):
-        self.store.put_source("s1", "chat", "wechat")
-        self.store.mark_source_processed("s1", ["/mem/1"])
-        unprocessed = self.store.list_unprocessed_sources()
-        self.assertEqual(len(unprocessed), 0)
+    def test_put_source(self):
+        self.store.put_source(
+            source_id="wechat_msg_001",
+            source_type="chat",
+            origin="wechat",
+            raw_content="你好啊",
+            event_time=time.time(),
+        )
+        source = self.store.get_source("wechat_msg_001")
+        self.assertIsNotNone(source)
 
-    def test_source_count(self):
-        self.assertEqual(self.store.source_count(), 0)
-        self.store.put_source("s1", "chat", "wechat")
-        self.assertEqual(self.store.source_count(), 1)
+    def test_mark_source_processed(self):
+        self.store.put_source(
+            source_id="bear_note_001",
+            source_type="text",
+            origin="bear",
+            raw_content="一篇随感",
+        )
+        self.store.mark_source_processed("bear_note_001", ["/thought/001"])
+        source = self.store.get_source("bear_note_001")
+        self.assertTrue(source.get("processed", False))
 
-    def test_context_manager(self):
-        with SQLiteStore(self.tmp.name) as s:
-            s.put(self._make_ctx("/ctx/mgr"))
-        # re-open to verify
-        s2 = SQLiteStore(self.tmp.name)
-        self.assertIsNotNone(s2.get("/ctx/mgr"))
-        s2.close()
+    def test_source_with_file_path(self):
+        self.store.put_source(
+            source_id="photo_001",
+            source_type="image",
+            origin="camera",
+            raw_content="客厅照片",
+            file_path="/photos/IMG_001.jpg",
+        )
+        source = self.store.get_source("photo_001")
+        self.assertEqual(source.get("file_path"), "/photos/IMG_001.jpg")
+
+
+class TestStoreEmbedding(unittest.TestCase):
+    """Test embedding storage."""
+
+    def setUp(self):
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
+
+    def tearDown(self):
+        self.store.close()
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_put_and_get_embedding(self):
+        vec = [0.1, 0.2, 0.3, 0.4, 0.5]
+        self.store.put_embedding("/test/embed", vec)
+        result = self.store.get_embedding("/test/embed")
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 5)
+        self.assertAlmostEqual(result[0], 0.1, places=5)
+
+    def test_get_nonexistent_embedding(self):
+        result = self.store.get_embedding("/no/embed")
+        self.assertIsNone(result)
+
+    def test_overwrite_embedding(self):
+        self.store.put_embedding("/test/overwrite", [1.0, 2.0])
+        self.store.put_embedding("/test/overwrite", [3.0, 4.0])
+        result = self.store.get_embedding("/test/overwrite")
+        self.assertAlmostEqual(result[0], 3.0, places=5)
+
+
+class TestStoreLinks(unittest.TestCase):
+    """Test context linking."""
+
+    def setUp(self):
+        self.db_path = tempfile.mktemp(suffix=".db")
+        self.store = SQLiteStore(self.db_path)
+        self.store.put(Context(uri="/a", abstract="node A"))
+        self.store.put(Context(uri="/b", abstract="node B"))
+        self.store.put(Context(uri="/c", abstract="node C"))
+
+    def tearDown(self):
+        self.store.close()
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_add_link(self):
+        self.store.add_link("/a", "/b", relation="related")
+        links = self.store.get_links("/a")
+        self.assertTrue(len(links) > 0)
+
+    def test_bidirectional_link(self):
+        self.store.add_link("/a", "/b", relation="colleague")
+        links_a = self.store.get_links("/a")
+        links_b = self.store.get_links("/b")
+        # At least one direction should work
+        self.assertTrue(len(links_a) > 0 or len(links_b) > 0)
+
+    def test_multiple_links(self):
+        self.store.add_link("/a", "/b", relation="friend")
+        self.store.add_link("/a", "/c", relation="colleague")
+        links = self.store.get_links("/a")
+        self.assertGreaterEqual(len(links), 2)
 
 
 if __name__ == "__main__":

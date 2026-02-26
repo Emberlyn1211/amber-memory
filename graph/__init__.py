@@ -142,24 +142,47 @@ class PeopleGraph:
         return self._row_to_person(row) if row else None
 
     def find_person(self, name: str) -> Optional[Person]:
-        """Find person by name or alias."""
-        # Exact name match
-        row = self.store.conn.execute(
-            "SELECT * FROM people WHERE name = ?", (name,)
-        ).fetchone()
-        if row:
-            return self._row_to_person(row)
-        # Alias search
-        rows = self.store.conn.execute(
-            "SELECT * FROM people WHERE aliases LIKE ?", (f'%"{name}"%',)
-        ).fetchall()
-        if rows:
-            return self._row_to_person(rows[0])
-        # Fuzzy name match
-        row = self.store.conn.execute(
-            "SELECT * FROM people WHERE name LIKE ?", (f'%{name}%',)
-        ).fetchone()
-        return self._row_to_person(row) if row else None
+        """Find person by name or alias.
+        
+        Handles formats like:
+        - "二丫" → exact match
+        - "刘雅韵 (二丫)" → try 刘雅韵, then 二丫
+        - "赵男 (男哥)" → try 赵男, then 男哥
+        - "风轻扬 (B 风轻扬)" → try 风轻扬, then B 风轻扬
+        """
+        # Extract parts from "Name (Alias)" format
+        candidates = [name.strip()]
+        m = re.match(r'^(.+?)\s*[(（](.+?)[)）]\s*$', name)
+        if m:
+            candidates = [m.group(1).strip(), m.group(2).strip()]
+            # Also try without common prefixes (A/B/K/L/N/O/J/Z + space)
+            for c in list(candidates):
+                stripped = re.sub(r'^[A-Z]\s+', '', c)
+                if stripped != c:
+                    candidates.append(stripped)
+        
+        for candidate in candidates:
+            # Exact name match
+            row = self.store.conn.execute(
+                "SELECT * FROM people WHERE name = ?", (candidate,)
+            ).fetchone()
+            if row:
+                return self._row_to_person(row)
+            # Alias search
+            rows = self.store.conn.execute(
+                "SELECT * FROM people WHERE aliases LIKE ?", (f'%"{candidate}"%',)
+            ).fetchall()
+            if rows:
+                return self._row_to_person(rows[0])
+        
+        # Fuzzy: try substring match on any candidate
+        for candidate in candidates:
+            row = self.store.conn.execute(
+                "SELECT * FROM people WHERE name LIKE ?", (f'%{candidate}%',)
+            ).fetchone()
+            if row:
+                return self._row_to_person(row)
+        return None
 
     def update_person(self, person_id: str, **kwargs) -> bool:
         """Update person fields."""

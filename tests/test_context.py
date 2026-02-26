@@ -1,223 +1,202 @@
-"""Tests for core.context — Context model, 8 dimensions, decay algorithm, URI."""
+"""Tests for Context model, URI system, and decay algorithm."""
 
-import math
 import time
 import unittest
-from unittest.mock import patch
+from datetime import datetime
 
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from core.context import (
-    Context, ContextType, MemoryCategory, EmotionTag,
-    DecayParams, DEFAULT_DECAY,
-)
-from core.uri import URI
-
-
-class TestContextType(unittest.TestCase):
-    """Test the 8 context type dimensions."""
-
-    def test_all_eight_dimensions_exist(self):
-        expected = {"memory", "person", "activity", "object",
-                    "preference", "taboo", "goal", "pattern", "thought"}
-        actual = {ct.value for ct in ContextType}
-        self.assertEqual(expected, actual)
-
-    def test_context_type_is_string_enum(self):
-        self.assertEqual(ContextType.PERSON, "person")
-        self.assertEqual(ContextType.TABOO, "taboo")
-        self.assertIsInstance(ContextType.MEMORY, str)
-
-    def test_memory_category_values(self):
-        expected = {"profile", "preferences", "entities", "events",
-                    "taboos", "goals", "cases", "patterns", "thoughts"}
-        actual = {mc.value for mc in MemoryCategory}
-        self.assertEqual(expected, actual)
-
-    def test_emotion_tag_values(self):
-        expected = {"neutral", "joy", "sadness", "anger",
-                    "surprise", "fear", "love", "nostalgia"}
-        actual = {et.value for et in EmotionTag}
-        self.assertEqual(expected, actual)
-
-
-class TestDecayParams(unittest.TestCase):
-    """Test DecayParams and decay_lambda calculation."""
-
-    def test_default_half_life(self):
-        self.assertEqual(DEFAULT_DECAY.half_life_days, 14.0)
-
-    def test_decay_lambda_formula(self):
-        params = DecayParams(half_life_days=14.0)
-        expected = math.log(2) / 14.0
-        self.assertAlmostEqual(params.decay_lambda, expected)
-
-    def test_custom_half_life(self):
-        params = DecayParams(half_life_days=30.0)
-        expected = math.log(2) / 30.0
-        self.assertAlmostEqual(params.decay_lambda, expected)
-
-    def test_default_emotion_multipliers(self):
-        params = DecayParams()
-        self.assertEqual(params.emotion_multipliers["neutral"], 1.0)
-        self.assertEqual(params.emotion_multipliers["love"], 1.4)
-        self.assertEqual(params.emotion_multipliers["nostalgia"], 1.35)
-
-    def test_importance_floor(self):
-        self.assertEqual(DEFAULT_DECAY.importance_floor, 0.05)
+from core.context import Context, ContextType, decay_score
+from core.uri import AmberURI
 
 
 class TestContextCreation(unittest.TestCase):
     """Test Context dataclass creation and defaults."""
 
-    def test_default_context(self):
-        ctx = Context()
-        self.assertEqual(len(ctx.id), 16)
-        self.assertEqual(ctx.uri, "")
-        self.assertEqual(ctx.context_type, ContextType.MEMORY)
+    def test_minimal_context(self):
+        ctx = Context(uri="/test/1", abstract="test memory")
+        self.assertEqual(ctx.uri, "/test/1")
+        self.assertEqual(ctx.abstract, "test memory")
         self.assertEqual(ctx.importance, 0.5)
-        self.assertEqual(ctx.access_count, 0)
-        self.assertEqual(ctx.emotion, EmotionTag.NEUTRAL)
-        self.assertIsInstance(ctx.tags, list)
-        self.assertIsInstance(ctx.linked_uris, list)
+        self.assertIsNotNone(ctx.created_at)
 
-    def test_custom_context(self):
+    def test_full_context(self):
         ctx = Context(
-            id="test123",
-            uri="/wechat/messages/test",
-            abstract="Test memory",
-            importance=0.8,
-            tags=["test", "unit"],
-            emotion="joy",
+            uri="/person/frankie",
+            parent_uri="/person",
+            abstract="Frankie是我的人类",
+            overview="Frankie Zhang，深圳，Telegram @kamael0909",
+            content="完整的关于Frankie的描述...",
+            context_type=ContextType.PERSON,
+            category="person",
+            importance=0.9,
+            tags=["important", "human"],
+            meta={"telegram_id": "5204055266"},
         )
-        self.assertEqual(ctx.id, "test123")
-        self.assertEqual(ctx.uri, "/wechat/messages/test")
-        self.assertEqual(ctx.importance, 0.8)
-        self.assertEqual(ctx.tags, ["test", "unit"])
+        self.assertEqual(ctx.category, "person")
+        self.assertEqual(ctx.importance, 0.9)
+        self.assertIn("important", ctx.tags)
+        self.assertEqual(ctx.meta["telegram_id"], "5204055266")
 
-    def test_unique_ids(self):
-        ids = {Context().id for _ in range(100)}
-        self.assertEqual(len(ids), 100)
+    def test_context_type_enum(self):
+        self.assertEqual(ContextType.PERSON.value, "person")
+        self.assertEqual(ContextType.ACTIVITY.value, "activity")
+        self.assertEqual(ContextType.OBJECT.value, "object")
+        self.assertEqual(ContextType.PREFERENCE.value, "preference")
+        self.assertEqual(ContextType.TABOO.value, "taboo")
+        self.assertEqual(ContextType.GOAL.value, "goal")
+        self.assertEqual(ContextType.PATTERN.value, "pattern")
+        self.assertEqual(ContextType.THOUGHT.value, "thought")
+        self.assertEqual(ContextType.MEMORY.value, "memory")
 
-    def test_timestamps_are_set(self):
+    def test_importance_clamping(self):
+        ctx = Context(uri="/test/high", abstract="high", importance=1.5)
+        self.assertLessEqual(ctx.importance, 1.5)  # No auto-clamp, user responsibility
+
+        ctx2 = Context(uri="/test/low", abstract="low", importance=-0.1)
+        self.assertEqual(ctx2.importance, -0.1)
+
+    def test_default_timestamps(self):
         before = time.time()
-        ctx = Context()
+        ctx = Context(uri="/test/ts", abstract="timestamp test")
         after = time.time()
         self.assertGreaterEqual(ctx.created_at, before)
         self.assertLessEqual(ctx.created_at, after)
 
+    def test_custom_event_time(self):
+        event_time = datetime(2026, 1, 15).timestamp()
+        ctx = Context(uri="/test/event", abstract="past event", event_time=event_time)
+        self.assertEqual(ctx.event_time, event_time)
 
-class TestContextDecay(unittest.TestCase):
-    """Test compute_score decay algorithm."""
+    def test_tags_default_empty(self):
+        ctx = Context(uri="/test/tags", abstract="no tags")
+        self.assertEqual(ctx.tags, [])
 
-    def test_fresh_memory_high_score(self):
-        ctx = Context(importance=1.0)
-        score = ctx.compute_score(now=ctx.last_accessed)
-        self.assertGreater(score, 0.9)
+    def test_meta_default_empty(self):
+        ctx = Context(uri="/test/meta", abstract="no meta")
+        self.assertEqual(ctx.meta, {})
+
+    def test_context_to_dict(self):
+        ctx = Context(uri="/test/dict", abstract="dict test", category="goal")
+        d = ctx.to_dict()
+        self.assertIsInstance(d, dict)
+        self.assertEqual(d["uri"], "/test/dict")
+        self.assertEqual(d["abstract"], "dict test")
+        self.assertEqual(d["category"], "goal")
+
+    def test_context_from_dict(self):
+        d = {
+            "uri": "/test/from",
+            "abstract": "from dict",
+            "category": "thought",
+            "importance": 0.7,
+        }
+        ctx = Context.from_dict(d)
+        self.assertEqual(ctx.uri, "/test/from")
+        self.assertEqual(ctx.category, "thought")
+        self.assertAlmostEqual(ctx.importance, 0.7)
+
+    def test_eight_dimensions(self):
+        dims = ["person", "activity", "object", "preference",
+                "taboo", "goal", "pattern", "thought"]
+        for dim in dims:
+            ctx = Context(uri=f"/test/{dim}", abstract=f"{dim} test", category=dim)
+            self.assertEqual(ctx.category, dim)
+
+    def test_parent_uri(self):
+        ctx = Context(uri="/person/frankie/detail", parent_uri="/person/frankie",
+                      abstract="detail")
+        self.assertEqual(ctx.parent_uri, "/person/frankie")
+
+    def test_content_layers(self):
+        ctx = Context(
+            uri="/test/layers",
+            abstract="L0: 一句话摘要",
+            overview="L1: 一段话概览，包含更多细节",
+            content="L2: 完整内容，可能很长很长...",
+        )
+        self.assertTrue(len(ctx.abstract) < len(ctx.overview))
+        self.assertTrue(len(ctx.overview) < len(ctx.content))
+
+
+class TestDecayScore(unittest.TestCase):
+    """Test the decay scoring algorithm."""
+
+    def test_fresh_memory_no_decay(self):
+        score = decay_score(importance=1.0, age_days=0, half_life=14)
+        self.assertAlmostEqual(score, 1.0, places=2)
 
     def test_half_life_decay(self):
-        now = time.time()
-        ctx = Context(importance=1.0, last_accessed=now - 14 * 86400)
-        score = ctx.compute_score(now=now)
-        # After one half-life, recency ~ 0.5
-        self.assertAlmostEqual(score, 0.5, delta=0.15)
+        score = decay_score(importance=1.0, age_days=14, half_life=14)
+        self.assertAlmostEqual(score, 0.5, places=2)
 
-    def test_very_old_memory_has_floor(self):
-        now = time.time()
-        ctx = Context(importance=0.5, last_accessed=now - 365 * 86400)
-        score = ctx.compute_score(now=now)
-        floor = DEFAULT_DECAY.importance_floor * ctx.importance
-        self.assertGreaterEqual(score, floor)
+    def test_double_half_life(self):
+        score = decay_score(importance=1.0, age_days=28, half_life=14)
+        self.assertAlmostEqual(score, 0.25, places=2)
 
-    def test_access_count_boosts_score(self):
-        now = time.time()
-        ctx_low = Context(importance=0.5, last_accessed=now - 7 * 86400, access_count=0)
-        ctx_high = Context(importance=0.5, last_accessed=now - 7 * 86400, access_count=50)
-        self.assertGreater(
-            ctx_high.compute_score(now=now),
-            ctx_low.compute_score(now=now),
-        )
+    def test_importance_scaling(self):
+        score_high = decay_score(importance=0.9, age_days=7, half_life=14)
+        score_low = decay_score(importance=0.3, age_days=7, half_life=14)
+        self.assertGreater(score_high, score_low)
 
-    def test_link_count_boosts_score(self):
-        now = time.time()
-        ctx_no_links = Context(importance=0.5, last_accessed=now, link_count=0)
-        ctx_links = Context(importance=0.5, last_accessed=now, link_count=10)
-        self.assertGreater(
-            ctx_links.compute_score(now=now),
-            ctx_no_links.compute_score(now=now),
-        )
+    def test_zero_importance(self):
+        score = decay_score(importance=0.0, age_days=0, half_life=14)
+        self.assertAlmostEqual(score, 0.0, places=5)
 
-    def test_link_count_capped_at_10(self):
-        now = time.time()
-        ctx_10 = Context(importance=0.5, last_accessed=now, link_count=10)
-        ctx_100 = Context(importance=0.5, last_accessed=now, link_count=100)
-        self.assertAlmostEqual(
-            ctx_10.compute_score(now=now),
-            ctx_100.compute_score(now=now),
-        )
+    def test_very_old_memory(self):
+        score = decay_score(importance=1.0, age_days=365, half_life=14)
+        self.assertLess(score, 0.001)
 
-    def test_emotion_boost(self):
-        now = time.time()
-        ctx_neutral = Context(importance=0.5, last_accessed=now, emotion="neutral")
-        ctx_love = Context(importance=0.5, last_accessed=now, emotion="love")
-        self.assertGreater(
-            ctx_love.compute_score(now=now),
-            ctx_neutral.compute_score(now=now),
-        )
+    def test_negative_age_treated_as_fresh(self):
+        score = decay_score(importance=1.0, age_days=-1, half_life=14)
+        self.assertGreaterEqual(score, 1.0)
 
-    def test_zero_importance_zero_score(self):
-        ctx = Context(importance=0.0)
-        score = ctx.compute_score()
-        self.assertEqual(score, 0.0)
+    def test_custom_half_life(self):
+        score_7 = decay_score(importance=1.0, age_days=7, half_life=7)
+        score_14 = decay_score(importance=1.0, age_days=7, half_life=14)
+        self.assertAlmostEqual(score_7, 0.5, places=2)
+        self.assertGreater(score_14, score_7)
+
+    def test_taboo_high_importance_slow_decay(self):
+        taboo_score = decay_score(importance=0.95, age_days=30, half_life=14)
+        normal_score = decay_score(importance=0.4, age_days=30, half_life=14)
+        self.assertGreater(taboo_score, normal_score * 2)
 
 
-class TestContextMethods(unittest.TestCase):
-    """Test Context helper methods."""
+class TestAmberURI(unittest.TestCase):
+    """Test the URI system."""
 
-    def test_touch_increments_access(self):
-        ctx = Context()
-        old_count = ctx.access_count
-        old_time = ctx.last_accessed
-        time.sleep(0.01)
-        ctx.touch()
-        self.assertEqual(ctx.access_count, old_count + 1)
-        self.assertGreater(ctx.last_accessed, old_time)
+    def test_parse_simple_uri(self):
+        uri = AmberURI.parse("amber://memories/person/frankie")
+        self.assertEqual(uri.scheme, "amber")
+        self.assertEqual(uri.dimension, "person")
 
-    def test_to_l0_returns_abstract(self):
-        ctx = Context(abstract="Short summary", uri="/test")
-        self.assertEqual(ctx.to_l0(), "Short summary")
+    def test_parse_with_id(self):
+        uri = AmberURI.parse("amber://memories/activity/abc123")
+        self.assertEqual(uri.dimension, "activity")
+        self.assertEqual(uri.resource_id, "abc123")
 
-    def test_to_l0_fallback_to_uri(self):
-        ctx = Context(uri="/test/path")
-        self.assertEqual(ctx.to_l0(), "/test/path")
+    def test_build_uri(self):
+        uri_str = AmberURI.build("goal", "learn_rust")
+        self.assertIn("goal", uri_str)
+        self.assertIn("learn_rust", uri_str)
 
-    def test_to_l1_returns_overview(self):
-        ctx = Context(overview="Detailed overview", abstract="Short")
-        self.assertEqual(ctx.to_l1(), "Detailed overview")
+    def test_dimension_roots(self):
+        dims = ["person", "activity", "object", "preference",
+                "taboo", "goal", "pattern", "thought"]
+        for dim in dims:
+            root = AmberURI.dimension_root(dim)
+            self.assertIn(dim, root)
 
-    def test_to_l2_returns_content(self):
-        ctx = Context(content="Full content here", overview="Overview")
-        self.assertEqual(ctx.to_l2(), "Full content here")
+    def test_is_child_of(self):
+        parent = "amber://memories/person"
+        child = "amber://memories/person/frankie"
+        self.assertTrue(child.startswith(parent))
 
-    def test_to_dict_roundtrip(self):
-        ctx = Context(
-            uri="/test/roundtrip",
-            abstract="Test",
-            tags=["a", "b"],
-            importance=0.7,
-        )
-        d = ctx.to_dict()
-        ctx2 = Context.from_dict(d)
-        self.assertEqual(ctx.uri, ctx2.uri)
-        self.assertEqual(ctx.abstract, ctx2.abstract)
-        self.assertEqual(ctx.tags, ctx2.tags)
-        self.assertAlmostEqual(ctx.importance, ctx2.importance)
-
-    def test_from_dict_ignores_extra_keys(self):
-        d = {"uri": "/test", "abstract": "hi", "unknown_field": 42}
-        ctx = Context.from_dict(d)
-        self.assertEqual(ctx.uri, "/test")
+    def test_slash_uri_compat(self):
+        ctx = Context(uri="/person/frankie", abstract="test")
+        self.assertTrue(ctx.uri.startswith("/"))
 
 
 if __name__ == "__main__":

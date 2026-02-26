@@ -35,6 +35,7 @@ from .retrieve.retriever import Retriever
 from .retrieve.intent_analyzer import IntentAnalyzer
 from .session.compressor import SessionCompressor
 from .session.memory_extractor import MemoryExtractor
+from .session.life_proposals import LifeProposalEngine
 from .graph import PeopleGraph
 from .graph.patterns import PatternDetector
 
@@ -73,6 +74,11 @@ class AmberMemory:
         self.people = PeopleGraph(store=self.store)
         # Pattern detection
         self.patterns = PatternDetector(store=self.store)
+        # Life proposals
+        self.proposals = LifeProposalEngine(
+            store=self.store, patterns=self.patterns,
+            llm_fn=llm_fn, decay_params=decay_params,
+        )
 
     # --- Core API ---
 
@@ -290,6 +296,66 @@ class AmberMemory:
         return self.store.remove_taboo(taboo_id)
 
     # --- Data Source Ingestion ---
+
+    def check_proposals(self, context: str = "") -> list:
+        """Check all heuristic triggers and return life proposals."""
+        return self.proposals.check_all()
+
+    async def check_proposals_with_llm(self, context: str = "") -> list:
+        """Check all triggers including LLM-powered proposals."""
+        return await self.proposals.check_all_with_llm(context)
+
+    def social_prep(self, person_name: str):
+        """Generate social prep context before meeting someone."""
+        return self.proposals.check_social_prep(person_name)
+
+    def dismiss_proposal(self, proposal_id: str):
+        """Dismiss a proposal."""
+        self.proposals.dismiss(proposal_id)
+
+    def act_on_proposal(self, proposal_id: str):
+        """Mark a proposal as acted upon."""
+        self.proposals.act_on(proposal_id)
+
+    def list_proposals(self, include_dismissed: bool = False, limit: int = 10):
+        """List recent proposals."""
+        return self.proposals.list_proposals(include_dismissed, limit)
+
+    # --- OpenClaw Integration ---
+
+    def session_context(self, max_chars: int = 3000, **kwargs) -> str:
+        """Generate memory context for a new OpenClaw session."""
+        from .integrations import OpenClawIntegration
+        integration = OpenClawIntegration(self)
+        return integration.generate_session_context(max_chars=max_chars, **kwargs)
+
+    def recall_context(self, query: str, limit: int = 8, max_chars: int = 2000) -> str:
+        """Generate recall context for a specific query."""
+        from .integrations import OpenClawIntegration
+        integration = OpenClawIntegration(self)
+        return integration.generate_recall_context(query, limit, max_chars)
+
+    def person_context(self, name: str, max_chars: int = 1500) -> str:
+        """Generate context about a specific person."""
+        from .integrations import OpenClawIntegration
+        integration = OpenClawIntegration(self)
+        return integration.generate_person_context(name, max_chars)
+
+    # --- MEMORY.md Sync ---
+
+    def export_memory_md(self, md_path: str = "MEMORY.md", **kwargs) -> str:
+        """Export DB to MEMORY.md format."""
+        from .sync import MemoryMdSync
+        sync = MemoryMdSync(self)
+        return sync.export_to_md(md_path, **kwargs)
+
+    def import_memory_md(self, md_path: str = "MEMORY.md") -> int:
+        """Import MEMORY.md into DB."""
+        from .sync import MemoryMdSync
+        sync = MemoryMdSync(self)
+        return sync.import_from_md(md_path)
+
+    # --- Data Source Ingestion (original) ---
 
     def ingest_wechat(self, limit: int = 100, since: Optional[float] = None) -> int:
         from .sources.wechat import WeChatSource

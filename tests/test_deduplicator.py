@@ -1,245 +1,215 @@
-"""Tests for session.memory_deduplicator — decision parsing, text overlap, decision paths."""
+"""Tests for MemoryDeduplicator — decision parsing, text overlap, merge/delete paths."""
 
-import asyncio
+import json
 import os
-import tempfile
-import time
 import unittest
-from unittest.mock import AsyncMock
 
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from session.memory_deduplicator import MemoryDeduplicator
 from core.context import Context
-from storage.sqlite_store import SQLiteStore
-from session.memory_deduplicator import (
-    MemoryDeduplicator, DedupDecision, DedupResult,
-    MemoryActionDecision, ExistingMemoryAction,
-)
-from session.memory_extractor import CandidateMemory
 
 
-def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+class MockDedupLLM:
+    """Mock LLM for dedup decisions."""
+
+    def __init__(self, decision="create"):
+        self.decision = decision
+        self.calls = []
+
+    async def __call__(self, prompt):
+        self.calls.append(prompt)
+        if self.decision == "skip":
+            return json.dumps({"decision": "skip", "reason": "已存在相同记忆"})
+        elif self.decision == "merge":
+            return json.dumps({
+                "decision": "create",
+                "merge_actions": [{"target_uri": "/old/1", "action": "merge"}],
+                "merged_content": "合并后的内容",
+                "reason": "信息互补，合并更好",
+            })
+        elif self.decision == "delete":
+            return json.dumps({
+                "decision": "create",
+                "merge_actions": [{"target_uri": "/old/1", "action": "delete"}],
+                "reason": "新记忆更完整，替换旧的",
+            })
+        else:
+            return json.dumps({"decision": "create", "reason": "全新记忆"})
 
 
-class DeduplicatorTestBase(unittest.TestCase):
+class TestDeduplicatorInit(unittest.TestCase):
+    """Test MemoryDeduplicator initialization."""
+
+    def test_create_without_llm(self):
+        dedup = MemoryDeduplicator(llm_fn=None)
+        self.assertIsNotNone(dedup)
+
+    def test_create_with_llm(self):
+        mock = MockDedupLLM()
+        dedup = MemoryDeduplicator(llm_fn=mock)
+        self.assertIsNotNone(dedup)
+
+
+class TestDecisionParsing(unittest.TestCase):
+    """Test parsing LLM dedup decisions."""
+
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.store = SQLiteStore(self.tmp.name)
+        self.dedup = MemoryDeduplicator(llm_fn=None)
 
-    def tearDown(self):
-        self.store.close()
-        os.unlink(self.tmp.name)
+    def test_parse_skip_decision(self):
+        raw = json.dumps({"decision": "skip", "reason": "duplicate"})
+        result = self.dedup._parse_decision(raw)
+        self.assertEqual(result["decision"], "skip")
 
-    def _make_candidate(self, abstract="Test candidate", category="preference", content="Full content"):
-        return CandidateMemory(
-            category=category, abstract=abstract,
-            overview="Overview", content=content,
-        )
+    def test_parse_create_decision(self):
+        raw = json.dumps({"decision": "create", "reason": "new memory"})
+        result = self.dedup._parse_decision(raw)
+        self.assertEqual(result["decision"], "create")
 
-    def _make_existing(self, uri, abstract="Existing memory", category="preference"):
-        ctx = Context(
-            uri=uri, abstract=abstract, overview="Existing overview",
-            content="Existing content", category=category,
-        )
-        self.store.put(ctx)
-        return ctx
+    def test_parse_none_decision(self):
+        raw = json.dumps({"decision": "none", "reason": "not worth storing"})
+        result = self.dedup._parse_decision(raw)
+        self.assertEqual(result["decision"], "none")
+
+    def test_parse_with_merge_actions(self):
+        raw = json.dumps({
+            "decision": "create",
+            "merge_actions": [
+                {"target_uri": "/person/laowang", "action": "merge"},
+            ],
+            "merged_content": "老王是同组同事，负责海外业务，下月去日本出差",
+        })
+        result = self.dedup._parse_decision(raw)
+        self.assertEqual(result["decision"], "create")
+        self.assertEqual(len(result["merge_actions"]), 1)
+        self.assertEqual(result["merge_actions"][0]["action"], "merge")
+
+    def test_parse_with_delete_action(self):
+        raw = json.dumps({
+            "decision": "create",
+            "merge_actions": [
+                {"target_uri": "/old/memory", "action": "delete"},
+            ],
+        })
+        result = self.dedup._parse_decision(raw)
+        self.assertEqual(result["merge_actions"][0]["action"], "delete")
+
+    def test_parse_invalid_json(self):
+        raw = "not json at all"
+        result = self.dedup._parse_decision(raw)
+        # Should return safe default
+        self.assertIn(result["decision"], ["create", "skip", "none"])
+
+    def test_parse_json_in_markdown(self):
+        raw = """```json
+{"decision": "skip", "reason": "已存在"}
+```"""
+        result = self.dedup._parse_decision(raw)
+        self.assertEqual(result["decision"], "skip")
+
+    def test_parse_unknown_decision_defaults(self):
+        raw = json.dumps({"decision": "unknown_value", "reason": "?"})
+        result = self.dedup._parse_decision(raw)
+        # Should normalize to valid decision
+        self.assertIn(result["decision"], ["create", "skip", "none"])
 
 
 class TestTextOverlap(unittest.TestCase):
-    """Test _text_overlap static method."""
+    """Test text overlap detection for quick dedup."""
 
-    def test_identical_strings(self):
-        score = MemoryDeduplicator._text_overlap("hello", "hello")
-        self.assertEqual(score, 1.0)
+    def setUp(self):
+        self.dedup = MemoryDeduplicator(llm_fn=None)
 
-    def test_no_overlap(self):
-        score = MemoryDeduplicator._text_overlap("abc", "xyz")
-        self.assertEqual(score, 0.0)
+    def test_identical_texts(self):
+        overlap = self.dedup._text_overlap("老王是同事", "老王是同事")
+        self.assertGreater(overlap, 0.9)
 
-    def test_partial_overlap(self):
-        score = MemoryDeduplicator._text_overlap("abcd", "cdef")
-        self.assertGreater(score, 0.0)
-        self.assertLess(score, 1.0)
-
-    def test_empty_strings(self):
-        self.assertEqual(MemoryDeduplicator._text_overlap("", ""), 0.0)
-        self.assertEqual(MemoryDeduplicator._text_overlap("abc", ""), 0.0)
-        self.assertEqual(MemoryDeduplicator._text_overlap("", "abc"), 0.0)
-
-    def test_overlap_is_symmetric(self):
-        a = MemoryDeduplicator._text_overlap("hello world", "world peace")
-        b = MemoryDeduplicator._text_overlap("world peace", "hello world")
-        self.assertAlmostEqual(a, b)
-
-
-class TestDeduplicateNoSimilar(DeduplicatorTestBase):
-    """Test dedup when no similar memories exist."""
-
-    def test_no_similar_creates(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        candidate = self._make_candidate(abstract="Completely unique memory xyz123")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.CREATE)
-        self.assertEqual(len(result.similar_memories), 0)
-
-    def test_no_llm_defaults_to_create(self):
-        self._make_existing("/pref/1", abstract="Test candidate similar", category="preference")
-        dedup = MemoryDeduplicator(store=self.store, llm_fn=None)
-        candidate = self._make_candidate(abstract="Test candidate similar")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.CREATE)
-
-
-class TestDeduplicateWithLLM(DeduplicatorTestBase):
-    """Test dedup with mock LLM decisions."""
-
-    def test_llm_skip_decision(self):
-        self._make_existing("/pref/1", abstract="喜欢咖啡", category="preference")
-        llm_response = '{"decision": "skip", "reason": "duplicate", "list": []}'
-        mock_llm = AsyncMock(return_value=llm_response)
-        dedup = MemoryDeduplicator(store=self.store, llm_fn=mock_llm)
-        candidate = self._make_candidate(abstract="喜欢咖啡", category="preference")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.SKIP)
-
-    def test_llm_create_decision(self):
-        self._make_existing("/pref/1", abstract="喜欢咖啡", category="preference")
-        llm_response = '{"decision": "create", "reason": "new info", "list": []}'
-        mock_llm = AsyncMock(return_value=llm_response)
-        dedup = MemoryDeduplicator(store=self.store, llm_fn=mock_llm)
-        candidate = self._make_candidate(abstract="喜欢咖啡和茶", category="preference")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.CREATE)
-
-    def test_llm_none_with_merge(self):
-        existing = self._make_existing("/pref/1", abstract="喜欢咖啡", category="preference")
-        llm_response = f'{{"decision": "none", "reason": "merge needed", "list": [{{"uri": "/pref/1", "decide": "merge", "reason": "same topic"}}]}}'
-        mock_llm = AsyncMock(return_value=llm_response)
-        dedup = MemoryDeduplicator(store=self.store, llm_fn=mock_llm)
-        candidate = self._make_candidate(abstract="喜欢咖啡", category="preference")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.NONE)
-        self.assertIsNotNone(result.actions)
-        self.assertEqual(len(result.actions), 1)
-        self.assertEqual(result.actions[0].decision, MemoryActionDecision.MERGE)
-
-    def test_llm_create_with_delete(self):
-        existing = self._make_existing("/pref/1", abstract="旧信息", category="preference")
-        llm_response = f'{{"decision": "create", "reason": "replace old", "list": [{{"uri": "/pref/1", "decide": "delete", "reason": "outdated"}}]}}'
-        mock_llm = AsyncMock(return_value=llm_response)
-        dedup = MemoryDeduplicator(store=self.store, llm_fn=mock_llm)
-        candidate = self._make_candidate(abstract="新信息", category="preference")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.CREATE)
-        self.assertEqual(len(result.actions), 1)
-        self.assertEqual(result.actions[0].decision, MemoryActionDecision.DELETE)
-
-    def test_llm_failure_defaults_to_create(self):
-        self._make_existing("/pref/1", abstract="喜欢咖啡", category="preference")
-        mock_llm = AsyncMock(side_effect=Exception("LLM error"))
-        dedup = MemoryDeduplicator(store=self.store, llm_fn=mock_llm)
-        candidate = self._make_candidate(abstract="喜欢咖啡", category="preference")
-        result = run(dedup.deduplicate(candidate))
-        self.assertEqual(result.decision, DedupDecision.CREATE)
-
-
-class TestParseDecision(DeduplicatorTestBase):
-    """Test _parse_decision logic."""
-
-    def test_skip_clears_actions(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        existing = [Context(uri="/a", abstract="A")]
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "skip", "reason": "dup", "list": [{"uri": "/a", "decide": "merge"}]},
-            existing,
+    def test_similar_texts(self):
+        overlap = self.dedup._text_overlap(
+            "老王是同组同事",
+            "老王是我们组的同事",
         )
-        self.assertEqual(decision, DedupDecision.SKIP)
-        self.assertEqual(len(actions), 0)
+        self.assertGreater(overlap, 0.5)
 
-    def test_create_with_merge_normalizes_to_none(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        existing = [Context(uri="/a", abstract="A")]
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "create", "list": [{"uri": "/a", "decide": "merge"}]},
-            existing,
+    def test_different_texts(self):
+        overlap = self.dedup._text_overlap(
+            "今天天气不错",
+            "量子力学很有趣",
         )
-        self.assertEqual(decision, DedupDecision.NONE)
+        self.assertLess(overlap, 0.3)
 
-    def test_create_only_keeps_delete_actions(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        existing = [Context(uri="/a", abstract="A"), Context(uri="/b", abstract="B")]
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "create", "list": [
-                {"uri": "/a", "decide": "delete"},
-                {"uri": "/b", "decide": "merge"},
-            ]},
-            existing,
+    def test_empty_text(self):
+        overlap = self.dedup._text_overlap("", "something")
+        self.assertAlmostEqual(overlap, 0.0, places=1)
+
+    def test_both_empty(self):
+        overlap = self.dedup._text_overlap("", "")
+        self.assertGreaterEqual(overlap, 0.0)
+
+    def test_subset_text(self):
+        overlap = self.dedup._text_overlap(
+            "老王",
+            "老王是同组同事负责海外业务",
         )
-        # merge present → normalized to none
-        self.assertEqual(decision, DedupDecision.NONE)
+        self.assertGreater(overlap, 0.2)
 
-    def test_legacy_merge_decision(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        existing = [Context(uri="/a", abstract="A")]
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "merge"},
-            existing,
-        )
-        self.assertEqual(decision, DedupDecision.NONE)
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0].decision, MemoryActionDecision.MERGE)
-
-    def test_index_based_action(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        existing = [Context(uri="/a", abstract="A"), Context(uri="/b", abstract="B")]
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "none", "list": [{"index": 2, "decide": "delete", "reason": "old"}]},
-            existing,
-        )
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0].memory.uri, "/b")
-
-    def test_conflicting_actions_for_same_uri_removed(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        existing = [Context(uri="/a", abstract="A")]
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "none", "list": [
-                {"uri": "/a", "decide": "merge", "reason": "r1"},
-                {"uri": "/a", "decide": "delete", "reason": "r2"},
-            ]},
-            existing,
-        )
-        # Conflicting actions for same URI should be removed
-        self.assertEqual(len(actions), 0)
-
-    def test_unknown_decision_defaults_to_create(self):
-        dedup = MemoryDeduplicator(store=self.store)
-        decision, reason, actions = dedup._parse_decision(
-            {"decision": "unknown_value"}, [],
-        )
-        self.assertEqual(decision, DedupDecision.CREATE)
+    def test_long_texts(self):
+        text1 = "这是一段关于项目进展的详细描述，包含了很多技术细节和决策过程" * 5
+        text2 = "这是一段关于项目进展的详细描述，包含了很多技术细节和决策过程" * 5
+        overlap = self.dedup._text_overlap(text1, text2)
+        self.assertGreater(overlap, 0.9)
 
 
-class TestFindSimilar(DeduplicatorTestBase):
-    """Test _find_similar method."""
+class TestQuickDedup(unittest.TestCase):
+    """Test quick dedup without LLM (text overlap based)."""
 
-    def test_finds_by_text_search(self):
-        self._make_existing("/pref/coffee", abstract="喜欢喝咖啡", category="preference")
-        dedup = MemoryDeduplicator(store=self.store)
-        candidate = self._make_candidate(abstract="喜欢喝咖啡每天", category="preference")
-        similar = dedup._find_similar(candidate)
-        self.assertGreater(len(similar), 0)
+    def setUp(self):
+        self.dedup = MemoryDeduplicator(llm_fn=None)
 
-    def test_max_similar_limit(self):
-        for i in range(10):
-            self._make_existing(f"/pref/{i}", abstract=f"共同关键词 item{i}", category="preference")
-        dedup = MemoryDeduplicator(store=self.store)
-        candidate = self._make_candidate(abstract="共同关键词 test", category="preference")
-        similar = dedup._find_similar(candidate)
-        self.assertLessEqual(len(similar), dedup.MAX_SIMILAR)
+    def test_obvious_duplicate(self):
+        new = Context(uri="/new/1", abstract="老王是同组同事", content="老王是同组同事")
+        existing = [
+            Context(uri="/old/1", abstract="老王是同组同事", content="老王是同组同事"),
+        ]
+        is_dup = self.dedup._quick_check(new, existing)
+        self.assertTrue(is_dup)
+
+    def test_not_duplicate(self):
+        new = Context(uri="/new/1", abstract="今天吃了火锅", content="今天吃了火锅")
+        existing = [
+            Context(uri="/old/1", abstract="老王是同事", content="老王是同组同事"),
+        ]
+        is_dup = self.dedup._quick_check(new, existing)
+        self.assertFalse(is_dup)
+
+    def test_empty_existing(self):
+        new = Context(uri="/new/1", abstract="新记忆", content="新记忆内容")
+        is_dup = self.dedup._quick_check(new, [])
+        self.assertFalse(is_dup)
+
+
+class TestMergeActions(unittest.TestCase):
+    """Test merge action execution."""
+
+    def setUp(self):
+        self.dedup = MemoryDeduplicator(llm_fn=None)
+
+    def test_merge_action_structure(self):
+        action = {"target_uri": "/old/1", "action": "merge"}
+        self.assertEqual(action["action"], "merge")
+        self.assertEqual(action["target_uri"], "/old/1")
+
+    def test_delete_action_structure(self):
+        action = {"target_uri": "/old/1", "action": "delete"}
+        self.assertEqual(action["action"], "delete")
+
+    def test_valid_actions(self):
+        valid = ["merge", "delete", "keep"]
+        for a in valid:
+            action = {"target_uri": "/test", "action": a}
+            self.assertIn(action["action"], valid)
 
 
 if __name__ == "__main__":

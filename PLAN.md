@@ -58,32 +58,54 @@
 - [x] 29 个测试全通过
 
 ### Phase 2 — 数据源接入
+**全量文字已完成（v8 跑完即固定），后续切增量模式：新消息实时处理，旧数据不回溯**
+
+#### 增量模式（新消息进来时）
+- [ ] 语音：silk → wav → 讯飞 STT → 文字 → 提取（价值最高，重要对话常用语音）
+- [ ] 链接/文章：提取 URL → 抓正文 → 摘要 → 提取（反映兴趣偏好）
+- [ ] 图片：豆包 VLM → 场景描述 → 提取（去哪了、和谁在一起）
+- [ ] 朋友圈：见下方专项
+
+#### 朋友圈数据源（专项）
+- [x] sns.db XML 解析（文字/图片URL/点赞/评论/位置）
+- [ ] 区分内容类型：纯图片 vs 链接文章 vs 视频 vs 封面图
+- [ ] Mac 微信只缓存打开过的朋友圈，需要实时刷才有数据
+- [ ] GUI 自动化刷朋友圈（难度高）：搜索联系人→点头像→点朋友圈→滚动→截图
+  - 已知问题：聊天记录删了搜不到人、朋友圈权限（三天/半年/仅聊天）、Mac 入口深
+  - 短期方案：Demo 时手动刷目标人朋友圈，sns.db 自动缓存，再跑解析
+  - 长期方案：手机端 Frida hook 或无障碍服务（但 Frida 挂久了微信退登录）
+
+#### 其他数据源
 - [ ] 照片语义（豆包图像识别 → 场景描述 → 源层 image → 记忆层"事"）
 - [ ] Watchlace 内部日程读取（API → 源层 schedule）
 - [ ] 位置数据（照片 EXIF + GPS → 源层 location）
-- [ ] Bear Notes 导入（读 SQLite → 源层 text → 记忆层"思考"）
+- [x] Bear Notes 导入（读 SQLite → 源层 text → 记忆层"思考"，已跑 297 篇）
 - [ ] 微信换号支持（新 Frida + 自动检测 wxid）
-- [ ] 链接/文章处理（URL → 抓取 → 源层 link）
-- [ ] 语音处理（讯飞 STT → 源层 voice）
 
 ### Phase 3 — 智能层
-- [ ] 豆包 embedding 语义搜索
-- [ ] LLM 自动提取（对话 → 人/事/物/偏好/禁忌/目标/模式/思考）
-- [ ] 人物图谱（entity + 关系网络 + 互动历史聚合）
-- [ ] 模式识别引擎（历史数据 → 行为规律）
-- [ ] "生活提案"触发器（共情+证据+行动+确认）
+- [ ] 豆包 embedding 语义搜索（embeddings 表空，需跑 reindex.py）
+- [x] LLM 自动提取（extract_batch.py + dedup.py，已跑 ~14000 条，产出 1100+ 记忆）
+- [ ] 人物图谱（people 82人 + relationships 128条，但 interactions 空，需全量数据后跑）
+- [ ] 模式识别引擎（patterns 10条，需更多数据）
+- [ ] "生活提案"触发器（proposals 4条，代码写了没接入）
+- [x] 承诺追踪（promise_tracker.py，已从现有记忆提取 110 条承诺）
 
 ### Phase 4 — Watchlace 智能层（非记忆，独立开发）
-- [ ] 高德 API 接入（路线规划/出发时间/堵车预估）
+- [ ] 高德 API 接入（smart_reminder.py 骨架写好，差 API Key）
 - [ ] 日程智能提醒（记忆层位置+模式 + 高德路线 → 提前提醒）
 - [ ] 日程对账（照片语义 vs 日程计划，自动比对）
 - [ ] 人格滑杆系统（Warmth/Playfulness/Banter/Formality/Pushiness/Chattiness）
 - [ ] 漫画生成（照片 → 商业插画风格日报）
+- [x] 语音 v2（流式 AI + MiniMax TTS + 预生成缓存）
+- [x] Demo 场景模拟器（demo_scenario.py，见面前智能简报）
+- [x] 承诺追踪 API + 记忆检索 API + 跨源冲突检测 API
 
 ### Phase 5 — 集成
-- [ ] OpenClaw 集成（新 session 自动加载上下文）
-- [ ] 反向导出 MEMORY.md
+- [ ] OpenClaw 集成（integrations/__init__.py 代码写好，未接入 session 启动流程）
+- [ ] 反向导出 MEMORY.md（sync/__init__.py 代码写好，未跑过）
 - [ ] Watchlace API 对接（记忆系统作为后端服务）
+- [ ] 禁忌系统接入日常对话（taboos 表 + contexts taboo 条目 → system prompt 注入）
+- [ ] 表结构文档 + 集成方案文档（ARCHITECTURE.md 已写）
 
 ---
 
