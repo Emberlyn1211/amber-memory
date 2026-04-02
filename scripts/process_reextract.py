@@ -156,9 +156,9 @@ def format_source_as_messages(source_type: str, content: str, metadata: str):
 
 
 async def process_batch(memory: AmberMemory, sources: list):
-    """Process a batch of sources and extract memories."""
+    """Process a batch of sources and stage memories to candidate_memories."""
     processed_count = 0
-    memory_count = 0
+    candidate_count = 0
     skipped_count = 0
     
     for source_id, source_type, content, metadata, created_at in sources:
@@ -180,33 +180,36 @@ async def process_batch(memory: AmberMemory, sources: list):
             summary_parts.append(f"\n🌟 重要人物（VIP）：\n{VIP_LIST}")
             summary = "\n".join(summary_parts)
             
-            # Extract memories using compress_session
-            memories = await memory.compress_session(
+            # compress_session now writes to candidate_memories (pending), not contexts
+            await memory.compress_session(
                 messages=messages,
                 user="frankie",
                 session_id=f"source_{source_id}",
                 summary=summary,
             )
             
-            # Mark source as processed
-            memory.store.mark_source_processed(
-                source_id,
-                [m.uri for m in memories]
+            # Count staged candidates for this source
+            cur = memory.store.conn.execute(
+                "SELECT COUNT(*) FROM candidate_memories WHERE source_session = ? AND status = 'pending'",
+                (f"source_{source_id}",)
             )
+            staged = cur.fetchone()[0]
+            candidate_count += staged
+            
+            # Mark source as processed
+            memory.store.mark_source_processed(source_id, [])
             
             processed_count += 1
-            memory_count += len(memories)
             
             if processed_count % 100 == 0:
-                logger.info(f"Processed {processed_count} sources, extracted {memory_count} memories, skipped {skipped_count}")
+                logger.info(f"Processed {processed_count} sources, staged {candidate_count} candidates, skipped {skipped_count}")
         
         except Exception as e:
             logger.error(f"Error processing source {source_id}: {e}")
-            # Mark as processed even if failed to avoid reprocessing
             memory.store.mark_source_processed(source_id, [])
             continue
     
-    return processed_count, memory_count, skipped_count
+    return processed_count, candidate_count, skipped_count
 
 
 async def main():
@@ -291,36 +294,36 @@ async def main():
             for src in batch
         ]
         
-        processed, memories, skipped = await process_batch(memory, sources)
+        processed, staged, skipped = await process_batch(memory, sources)
         total_processed += processed
-        total_memories += memories
+        total_memories += staged
         total_skipped += skipped
         
         offset += BATCH_SIZE
         
-        logger.info(f"Batch {batch_num} complete: {processed} sources → {memories} memories (skipped {skipped})")
+        logger.info(f"Batch {batch_num} complete: {processed} sources → {staged} candidates staged (skipped {skipped})")
         logger.info(f"Progress: {total_processed + total_skipped}/{total_unprocessed} ({100*(total_processed + total_skipped)/total_unprocessed:.1f}%)")
     
     logger.info(f"\n=== Processing complete ===")
     logger.info(f"Total processed: {total_processed} sources")
     logger.info(f"Total skipped: {total_skipped} sources (tier0 junk groups)")
-    logger.info(f"Total extracted: {total_memories} memories")
+    logger.info(f"Total staged: {total_memories} candidates in pending")
     
     # Final stats
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.execute("SELECT COUNT(*) FROM contexts")
     total_contexts = cursor.fetchone()[0]
-    
-    # Count by category
-    cursor = conn.execute("SELECT category, COUNT(*) FROM contexts GROUP BY category")
-    category_stats = dict(cursor.fetchall())
+    cursor = conn.execute("SELECT COUNT(*) FROM candidate_memories")
+    total_candidates = cursor.fetchone()[0]
+    cursor = conn.execute("SELECT COUNT(*) FROM candidate_memories WHERE status='pending'")
+    pending_candidates = cursor.fetchone()[0]
     
     conn.close()
     
     logger.info(f"\nFinal database stats:")
-    logger.info(f"Total contexts: {total_contexts}")
-    for cat, count in sorted(category_stats.items()):
-        logger.info(f"  {cat}: {count}")
+    logger.info(f"Total contexts (canonical): {total_contexts}")
+    logger.info(f"Total candidates: {total_candidates}")
+    logger.info(f"Pending candidates: {pending_candidates} (run promote_candidates.py to promote)")
 
 
 if __name__ == "__main__":
