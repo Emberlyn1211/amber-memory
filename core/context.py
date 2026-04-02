@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from .uri import URI
@@ -91,6 +91,19 @@ class DecayParams:
         "love": 1.4,
         "nostalgia": 1.35,
     })
+
+    # Per-category decay overrides (half_life_days, min_importance)
+    category_decay: Dict[str, Tuple[Optional[float], float]] = field(default_factory=lambda: {
+        'taboo':      (None, 1.0),    # never decay, importance locked at 1.0
+        'person':     (60,   0.3),    # relationships are long-term
+        'preference': (30,   0.2),    # preferences change slowly
+        'pattern':    (30,   0.2),    # behavioral patterns are stable
+        'thought':    (30,   0.15),   # thoughts have long-term value
+        'goal':       (45,   0.3),    # goals persist until achieved
+        'activity':   (14,   0.1),    # daily activities decay normally
+        'object':     (14,   0.1),    # object info decays normally
+        'place':      (21,   0.1),    # places slightly more persistent
+    })
     
     @property
     def decay_lambda(self) -> float:
@@ -128,6 +141,8 @@ class Context:
     updated_at: float = field(default_factory=time.time)
     last_accessed: float = field(default_factory=time.time)
     event_time: Optional[float] = None   # when the event happened (vs when recorded)
+    valid_from: Optional[float] = None   # validity window start
+    valid_to: Optional[float] = None     # validity window end
     
     # Decay tracking
     access_count: int = 0
@@ -144,27 +159,43 @@ class Context:
     meta: Dict[str, Any] = field(default_factory=dict)
     
     def compute_score(self, params: DecayParams = DEFAULT_DECAY, now: Optional[float] = None) -> float:
-        """Compute current memory score with decay."""
+        """Compute current memory score with category-aware decay."""
         now = now or time.time()
         days_elapsed = max(0, (now - self.last_accessed) / 86400.0)
-        
-        # Exponential decay
-        recency = math.exp(-params.decay_lambda * days_elapsed)
-        
+
+        # Category-specific decay parameters
+        cat_config = params.category_decay.get(self.category)
+        if cat_config:
+            cat_half_life, cat_min_importance = cat_config
+        else:
+            cat_half_life, cat_min_importance = params.half_life_days, params.importance_floor
+
+        # Exponential decay (None = never decay)
+        if cat_half_life is None:
+            recency = 1.0
+        else:
+            cat_lambda = math.log(2) / cat_half_life
+            recency = math.exp(-cat_lambda * days_elapsed)
+
+        # Effective importance (category minimum + commitment lock)
+        effective_importance = max(self.importance, cat_min_importance)
+        if self.meta.get('locked'):
+            effective_importance = max(effective_importance, 0.8)
+
         # Access frequency boost
         access_boost = 1.0 + math.log(1.0 + self.access_count) * params.access_weight
-        
+
         # Link boost
         link_boost = 1.0 + min(self.link_count, 10) * params.link_weight
-        
+
         # Emotion boost
         emotion_boost = params.emotion_multipliers.get(self.emotion, 1.0)
-        
+
         # Final score
-        raw_score = self.importance * recency * access_boost * link_boost * emotion_boost
-        
+        raw_score = effective_importance * recency * access_boost * link_boost * emotion_boost
+
         # Apply floor
-        return max(raw_score, params.importance_floor * self.importance)
+        return max(raw_score, params.importance_floor * effective_importance)
     
     def touch(self):
         """Record an access, refreshing decay."""
